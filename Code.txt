@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SAGAR.AI AI+</title>
+
+  <!-- React + Babel -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Three.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+  <!-- Fonts -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+Devanagari:wght@400;500;700&display=swap" rel="stylesheet">
+
+  <!-- Font Awesome -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/>
+
+  <style>
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #0f172a;
+      color: #e2e8f0;
+      overflow: hidden; 
+      margin: 0;
+    }
+
+    .hindi-text {
+      font-family: 'Noto Sans Devanagari', sans-serif;
+    }
+
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 10px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #475569;
+    }
+
+    #canvas-container {
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      background: radial-gradient(circle at center, #1e293b 0%, #0f172a 100%);
+      pointer-events: none;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: scale(0.95); }
+      to { opacity: 1; transform: scale(1); }
+    }
+    .animate-fade-in { animation: fadeIn 0.3s ease-out forwards; }
+    
+    .glass-panel {
+      background: rgba(15, 23, 42, 0.6);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(148, 163, 184, 0.1);
+    }
+
+    .cursor-blink {
+      display: inline-block;
+      width: 2px;
+      height: 1em;
+      background-color: #22d3ee;
+      margin-left: 2px;
+      animation: blink 1s step-end infinite;
+      vertical-align: middle;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const apiKey = "";
+    const { useState, useEffect, useRef } = React;
+
+    // --- Helpers for Audio ---
+
+    function base64ToArrayBuffer(base64) {
+      const binaryString = window.atob(base64);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      return bytes.buffer;
+    }
+
+    // Concatenate multiple PCM ArrayBuffers
+    function concatenateAudioBuffers(buffers) {
+      let totalLength = 0;
+      for (const b of buffers) {
+        totalLength += b.byteLength;
+      }
+      const tmp = new Uint8Array(totalLength);
+      let offset = 0;
+      for (const b of buffers) {
+        tmp.set(new Uint8Array(b), offset);
+        offset += b.byteLength;
+      }
+      return tmp.buffer;
+    }
+
+    function createWavFile(audioData, sampleRate = 24000) {
+      const numChannels = 1;
+      const bitsPerSample = 16;
+      const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
+      const blockAlign = (numChannels * bitsPerSample) / 8;
+      const dataSize = audioData.byteLength;
+      const headerSize = 44;
+      const totalSize = headerSize + dataSize;
+
+      const buffer = new ArrayBuffer(totalSize);
+      const view = new DataView(buffer);
+
+      writeString(view, 0, 'RIFF');
+      view.setUint32(4, 36 + dataSize, true);
+      writeString(view, 8, 'WAVE');
+      writeString(view, 12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, numChannels, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, byteRate, true);
+      view.setUint16(32, blockAlign, true);
+      view.setUint16(34, bitsPerSample, true);
+      writeString(view, 36, 'data');
+      view.setUint32(40, dataSize, true);
+
+      const audioBytes = new Uint8Array(audioData);
+      const finalBytes = new Uint8Array(buffer);
+      finalBytes.set(audioBytes, 44);
+
+      return new Blob([buffer], { type: 'audio/wav' });
+    }
+
+    function writeString(view, offset, string) {
+      for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+      }
+    }
+
+    // Chunk text to avoid API limits (reduced to 600 for safe Hindi processing)
+    function splitTextIntoChunks(text, maxLength = 600) {
+        const chunks = [];
+        let currentChunk = "";
+        
+        // Split by sentence endings to keep flow natural
+        // Improved regex to handle Hindi danda (।)
+        const sentences = text.match(/[^.!?\n।]+[.!?\n।]*/g) || [text];
+
+        for (const sentence of sentences) {
+            if ((currentChunk + sentence).length > maxLength) {
+                if (currentChunk) chunks.push(currentChunk);
+                currentChunk = sentence;
+            } else {
+                currentChunk += sentence;
+            }
+        }
+        if (currentChunk) chunks.push(currentChunk);
+        return chunks;
+    }
+
+    /* =======================
+       3D BACKGROUND
+       ======================== */
+    const Background3D = () => {
+      const mountRef = useRef(null);
+      useEffect(() => {
+        if (!mountRef.current) return;
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x0f172a, 0.002);
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+        camera.position.z = 50;
+        const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        mountRef.current.appendChild(renderer.domElement);
+        
+        const geometry = new THREE.BufferGeometry();
+        const count = 1500;
+        const positions = new Float32Array(count * 3);
+        for(let i=0; i<count*3; i++) positions[i] = (Math.random()-0.5)*200;
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        
+        const getTexture = () => {
+           const c = document.createElement('canvas'); c.width=32; c.height=32;
+           const ctx = c.getContext('2d');
+           const g = ctx.createRadialGradient(16,16,0,16,16,16);
+           g.addColorStop(0,'rgba(255,255,255,1)');
+           g.addColorStop(0.5,'rgba(255,255,255,0.2)');
+           g.addColorStop(1,'rgba(0,0,0,0)');
+           ctx.fillStyle=g; ctx.fillRect(0,0,32,32);
+           const t = new THREE.Texture(c); t.needsUpdate=true; return t;
+        };
+        const material = new THREE.PointsMaterial({ size: 0.6, color: 0x22d3ee, transparent: true, opacity: 0.6, map: getTexture(), blending: THREE.AdditiveBlending, depthWrite: false });
+        const particles = new THREE.Points(geometry, material);
+        scene.add(particles);
+
+        let mouseX=0, mouseY=0;
+        const onMM = (e) => { mouseX=(e.clientX-window.innerWidth/2)*0.0005; mouseY=(e.clientY-window.innerHeight/2)*0.0005; };
+        document.addEventListener('mousemove', onMM);
+        
+        let afId;
+        const animate = () => {
+           afId = requestAnimationFrame(animate);
+           particles.rotation.y += 0.02*(mouseX-particles.rotation.y);
+           particles.rotation.x += 0.02*(mouseY-particles.rotation.x);
+           particles.rotation.z += 0.0003;
+           renderer.render(scene, camera);
+        };
+        animate();
+        
+        const rs = () => { camera.aspect=window.innerWidth/window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); };
+        window.addEventListener('resize', rs);
+        return () => { window.removeEventListener('resize', rs); document.removeEventListener('mousemove', onMM); cancelAnimationFrame(afId); if(mountRef.current && renderer.domElement) mountRef.current.removeChild(renderer.domElement); geometry.dispose(); material.dispose(); renderer.dispose(); };
+      }, []);
+      return <div id="canvas-container" ref={mountRef}></div>;
+    };
+
+    /* =======================
+       DASHBOARD
+       ======================== */
+    const Dashboard = ({ onBack }) => {
+      const [script, setScript] = useState("");
+      const [tone, setTone] = useState("Cinematic");
+      const [gender, setGender] = useState("Male"); // Default set to Male
+      const [elevenLabsFormat, setElevenLabsFormat] = useState(false);
+      const [generatedResult, setGeneratedResult] = useState(null);
+      const [isProcessing, setIsProcessing] = useState(false);
+      const [isAudioProcessing, setIsAudioProcessing] = useState(false);
+      const [errorMessage, setErrorMessage] = useState("");
+      const [audioUrl, setAudioUrl] = useState(null);
+      const [copySuccess, setCopySuccess] = useState(false);
+      const [progress, setProgress] = useState(0); 
+
+      const resultRef = useRef(null);
+
+      // Enhanced Voice Mapping - FORCE PUCK FOR MALE
+      const getVoiceName = (t, g) => {
+        // Strict Puck enforcement for Male gender to prevent switching
+        if (g === "Male") return "Puck";
+
+        const map = {
+            "Cinematic": { "Female": "Kore" },
+            "Action": { "Female": "Aoede" },
+            "Emotional": { "Female": "Leda" },
+            "Comedy": { "Female": "Rasalgethi" },
+            "Horror": { "Female": "Umbriel" }
+        };
+        // Default fallback
+        return map[t]?.["Female"] || "Kore";
+      };
+
+      const tones = [
+        { id: "Cinematic", icon: "fa-film" },
+        { id: "Action", icon: "fa-bolt" },
+        { id: "Emotional", icon: "fa-heart" },
+        { id: "Comedy", icon: "fa-face-laugh-beam" },
+        { id: "Horror", icon: "fa-ghost" }
+      ];
+
+      const callGemini = async (prompt, text, retries = 0) => {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+        try {
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ contents: [{ parts: [{ text: text }] }], systemInstruction: { parts: [{ text: prompt }] } })
+          });
+          if (!response.ok) throw new Error('API Error');
+          const data = await response.json();
+          return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response received.";
+        } catch (error) {
+          if (retries < 3) {
+            await new Promise(r => setTimeout(r, Math.pow(2, retries)*1000));
+            return callGemini(prompt, text, retries + 1);
+          }
+          throw error;
+        }
+      };
+
+      // Improved TTS call with retry and better error logging
+      const callTTSChunk = async (text, voiceName, retries = 2) => {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
+        
+        try {
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                contents: [{ parts: [{ text: text }] }],
+                generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voiceName } } } }
+                })
+            });
+
+            if (!response.ok) {
+                // Try to parse error details
+                const errData = await response.json().catch(() => ({}));
+                const msg = errData.error?.message || response.statusText;
+                throw new Error(`TTS Error (${response.status}): ${msg}`);
+            }
+
+            const data = await response.json();
+            const base64 = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+            if (!base64) throw new Error("No audio data returned");
+            return base64ToArrayBuffer(base64);
+
+        } catch (error) {
+            if (retries > 0) {
+                console.warn(`TTS Chunk retry ${retries} left. Error:`, error);
+                await new Promise(r => setTimeout(r, 1000)); // Wait 1s before retry
+                return callTTSChunk(text, voiceName, retries - 1);
+            }
+            throw error;
+        }
+      };
+
+      const handleGenerate = async () => {
+        if (!script) return;
+        setIsProcessing(true); setErrorMessage(""); setGeneratedResult(""); setAudioUrl(null);
+        
+        // Exact system prompt from user request
+        let systemPrompt = `Is script ko cinematic dubbing style Hindi me rewrite karo. Hindi sirf Devanagari me likho aur English words English me hi rehne do. Original meaning, order, length aur details bilkul same rakho — kuch add, remove, summarize ya invent mat karo. Tone natural, conversational Hinglish ho. Voice-over ready ek hi continuous single block me do, bina headings, paragraphs ya extra line breaks ke. Natural pauses (…) aur dramatic beats (—) sirf jahan organically fit ho wahan use karo. Koi poetic ya over-dramatic language use mat karo. Symbols jaise //, [], (), bullets ya extra markers hata do. Names, places aur terms exactly same rakho.`;
+        
+        // Dynamic Tone Injection
+        systemPrompt += ` Selected Tone: ${tone}.`;
+
+        // ElevenLabs Exception Injection
+        if (elevenLabsFormat) {
+          systemPrompt += ` IMPORTANT EXCEPTION: Add descriptive emotion tags in brackets [Whisper], [Excited] etc. at the start of sentences. This overrides the "markers hata do" instruction for brackets only.`;
+        }
+
+        try {
+          const resultText = await callGemini(systemPrompt, script);
+          setIsProcessing(false);
+          let i = 0;
+          const interval = setInterval(() => {
+            i += 20;
+            const sliceEnd = Math.min(i, resultText.length);
+            setGeneratedResult(resultText.slice(0, sliceEnd));
+            if(resultRef.current) resultRef.current.scrollTop = resultRef.current.scrollHeight;
+            if (sliceEnd >= resultText.length) clearInterval(interval);
+          }, 5);
+        } catch (error) {
+          setIsProcessing(false);
+          setErrorMessage("Failed to generate script.");
+        }
+      };
+
+      const handleGenerateAudio = async () => {
+        if (!generatedResult) return;
+        setIsAudioProcessing(true);
+        setErrorMessage("");
+        setAudioUrl(null);
+        setProgress(0);
+        
+        try {
+           const voiceName = getVoiceName(tone, gender);
+           
+           // 1. Split Text (Smaller chunks for safety)
+           const chunks = splitTextIntoChunks(generatedResult, 600); 
+           const audioBuffers = [];
+
+           // 2. Process chunks
+           for (let i = 0; i < chunks.length; i++) {
+             const chunk = chunks[i];
+             // Skip empty chunks
+             if (!chunk || chunk.trim().length === 0) continue;
+
+             setProgress(Math.round(((i) / chunks.length) * 100));
+             
+             try {
+                const buffer = await callTTSChunk(chunk, voiceName);
+                audioBuffers.push(buffer);
+             } catch (e) {
+                console.error("Chunk failed", e);
+                // Stop processing on error to show message
+                throw e;
+             }
+           }
+           
+           setProgress(100);
+
+           // 3. Merge Audio
+           if (audioBuffers.length > 0) {
+               const mergedBuffer = concatenateAudioBuffers(audioBuffers);
+               const wavBlob = createWavFile(mergedBuffer, 24000);
+               setAudioUrl(URL.createObjectURL(wavBlob));
+           } else {
+               throw new Error("No audio generated");
+           }
+           
+           setIsAudioProcessing(false);
+        } catch (error) {
+            setIsAudioProcessing(false);
+            setErrorMessage(`${error.message}`);
+            setProgress(0);
+        }
+      };
+
+      const handleCopy = () => {
+        if (!generatedResult) return;
+        const doCopy = () => { setCopySuccess(true); setTimeout(() => setCopySuccess(false), 2000); };
+        
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(generatedResult)
+                .then(doCopy)
+                .catch((err) => {
+                    console.warn("Clipboard API failed, trying fallback...", err);
+                    fallbackCopy();
+                });
+        } else {
+            fallbackCopy();
+        }
+
+        function fallbackCopy() {
+            try {
+                const ta = document.createElement("textarea");
+                ta.value = generatedResult;
+                ta.style.position = "fixed";
+                ta.style.top = "0";
+                ta.style.left = "0";
+                ta.style.opacity = "0";
+                document.body.appendChild(ta);
+                ta.focus();
+                ta.select();
+                const success = document.execCommand('copy');
+                document.body.removeChild(ta);
+                if (success) doCopy();
+            } catch (e) {
+                console.error("Fallback copy failed", e);
+            }
+        }
+      };
+
+      return (
+        <div className="flex flex-col md:flex-row h-screen w-full p-4 md:p-6 gap-4 md:gap-6 animate-fade-in relative z-10">
+          
+          {/* LEFT PANEL */}
+          <div className="flex-1 flex flex-col glass-panel rounded-2xl overflow-hidden shadow-2xl">
+            <div className="p-4 border-b border-slate-700/50 flex justify-between items-center bg-slate-900/40">
+              <h2 className="text-indigo-400 font-semibold flex items-center gap-2">
+                <i className="fa-regular fa-file-lines"></i> Source Script
+              </h2>
+              <button onClick={() => setScript("")} className="text-xs text-slate-400 hover:text-white transition-colors flex items-center gap-1 px-2 py-1 hover:bg-slate-700 rounded">
+                <i className="fa-solid fa-trash-can"></i> Clear
+              </button>
+            </div>
+            <div className="flex-1 p-4">
+              <textarea value={script} onChange={(e) => setScript(e.target.value)} placeholder="Paste your original script here..." className="w-full h-full bg-transparent border-none outline-none text-slate-300 placeholder-slate-600 resize-none font-medium text-base leading-relaxed"></textarea>
+            </div>
+            <div className="p-4 bg-slate-900/60 border-t border-slate-700/50 space-y-4">
+              <div className="flex justify-between items-center">
+                <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Tone</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-400">11Labs Tags</span>
+                  <button onClick={() => setElevenLabsFormat(!elevenLabsFormat)} className={`w-8 h-4 rounded-full relative transition-colors ${elevenLabsFormat ? 'bg-indigo-600' : 'bg-slate-600'}`}>
+                    <div className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full transition-transform ${elevenLabsFormat ? 'translate-x-4' : 'translate-x-0'}`}></div>
+                  </button>
+                </div>
+              </div>
+              <div className="grid grid-cols-5 gap-2">
+                {tones.map((t) => (
+                  <button key={t.id} onClick={() => setTone(t.id)} className={`flex flex-col items-center justify-center p-2 rounded-xl border transition-all ${tone === t.id ? 'bg-indigo-600/20 border-indigo-500 text-indigo-300' : 'bg-slate-800/50 border-transparent text-slate-500 hover:bg-slate-800'}`}>
+                    <i className={`fa-solid ${t.icon} mb-1 text-base`}></i>
+                    <span className="text-[9px] font-medium">{t.id}</span>
+                  </button>
+                ))}
+              </div>
+              <button onClick={handleGenerate} disabled={!script || isProcessing} className={`w-full py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 ${!script ? 'bg-slate-800 text-slate-600' : 'bg-gradient-to-r from-indigo-600 to-indigo-500 text-white hover:shadow-lg'}`}>
+                {isProcessing ? <i className="fa-solid fa-circle-notch fa-spin"></i> : <><i className="fa-solid fa-wand-magic-sparkles"></i> Generate Hindi Script</>}
+              </button>
+            </div>
+          </div>
+
+          {/* RIGHT PANEL */}
+          <div className="flex-1 flex flex-col glass-panel rounded-2xl overflow-hidden shadow-2xl relative">
+            <div className="p-4 border-b border-slate-700/50 flex justify-between items-center bg-slate-900/40">
+               <div className="flex items-center gap-4">
+                 <h2 className="text-cyan-400 font-semibold flex items-center gap-2">
+                  <i className="fa-solid fa-microphone-lines"></i> Result
+                 </h2>
+                 {/* Gender Toggle */}
+                 <div className="flex bg-slate-800 p-1 rounded-lg">
+                    <button onClick={()=>setGender("Male")} className={`px-3 py-1 text-xs rounded-md transition-all ${gender==="Male" ? 'bg-slate-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}>Male</button>
+                    <button onClick={()=>setGender("Female")} className={`px-3 py-1 text-xs rounded-md transition-all ${gender==="Female" ? 'bg-slate-600 text-white shadow' : 'text-slate-500 hover:text-slate-300'}`}>Female</button>
+                 </div>
+               </div>
+
+               {audioUrl && (
+                 <div className="flex items-center gap-2 animate-fade-in">
+                    <audio controls src={audioUrl} className="h-8 w-40 opacity-90 rounded-full bg-slate-800" />
+                    <a href={audioUrl} download={`sagar_ai_${gender}_${tone}.wav`} className="w-8 h-8 flex items-center justify-center rounded-full bg-slate-800 text-cyan-400 hover:bg-slate-700" title="Download">
+                        <i className="fa-solid fa-download text-xs"></i>
+                    </a>
+                 </div>
+               )}
+            </div>
+
+            <div className="flex-1 p-6 relative overflow-hidden flex items-start">
+              {errorMessage && (
+                <div className="absolute top-4 left-0 right-0 flex justify-center z-20">
+                  <div className="px-4 py-2 bg-red-900/80 border border-red-500/50 rounded-full text-red-100 text-xs backdrop-blur-md shadow-lg">
+                    {errorMessage}
+                  </div>
+                </div>
+              )}
+              
+              {isAudioProcessing && progress > 0 && progress < 100 && (
+                  <div className="absolute top-0 left-0 h-1 bg-cyan-500 transition-all duration-300" style={{width: `${progress}%`, zIndex:30}}></div>
+              )}
+
+              {generatedResult !== null ? (
+                 <div ref={resultRef} className="text-left w-full h-full animate-fade-in hindi-text text-lg text-cyan-50/90 overflow-y-auto leading-relaxed scroll-smooth pr-2 pb-20">
+                    {generatedResult}
+                    {isProcessing && <span className="cursor-blink"></span>}
+                 </div>
+              ) : (
+                <div className="m-auto space-y-4 opacity-30 flex flex-col items-center select-none">
+                  <i className="fa-solid fa-language text-4xl text-slate-600"></i>
+                  <p className="text-sm text-slate-500">Translation will appear here</p>
+                </div>
+              )}
+            </div>
+
+             <div className="absolute bottom-6 right-6 flex flex-col gap-3 z-10">
+                 <button onClick={handleCopy} className={`w-10 h-10 rounded-full border border-slate-700 flex items-center justify-center shadow-lg active:scale-90 ${copySuccess ? 'bg-green-600 text-white' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}>
+                    {copySuccess ? <i className="fa-solid fa-check text-xs"></i> : <i className="fa-solid fa-copy text-xs"></i>}
+                 </button>
+                 <button onClick={handleGenerateAudio} disabled={!generatedResult || isAudioProcessing} className={`w-12 h-12 rounded-full flex items-center justify-center shadow-xl group active:scale-90 relative ${!generatedResult ? 'bg-slate-700 text-slate-500' : 'bg-cyan-600 text-white hover:bg-cyan-500'}`}>
+                    {isAudioProcessing ? <span className="text-xs font-bold">{progress}%</span> : <i className="fa-solid fa-microphone-lines"></i>}
+                 </button>
+             </div>
+          </div>
+        </div>
+      );
+    };
+
+    const LandingPage = ({ onStart }) => {
+      const [loading, setLoading] = useState(true);
+      useEffect(() => { setTimeout(() => setLoading(false), 800); }, []);
+      return (
+        <main className={`flex flex-col items-center justify-center h-full transition-opacity duration-1000 ${loading ? 'opacity-0' : 'opacity-100'} absolute inset-0 z-10`}>
+            <div className="text-center space-y-8 p-10 rounded-[2rem] glass-panel shadow-2xl animate-fade-in max-w-lg mx-4">
+              <div className="inline-flex items-center justify-center w-24 h-24 rounded-full bg-indigo-500/10 border border-indigo-500/20 mb-2 shadow-[0_0_30px_rgba(99,102,241,0.2)]">
+                <i className="fa-solid fa-bolt-lightning text-5xl text-indigo-400"></i>
+              </div>
+              <div className="space-y-2">
+                <h1 className="text-6xl md:text-7xl font-bold tracking-tighter">
+                  <span className="bg-clip-text text-transparent bg-gradient-to-b from-white to-slate-400">SAGAR.</span>
+                  <span className="bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 to-indigo-500">AI</span>
+                </h1>
+                <div className="inline-block px-3 py-1 rounded-full bg-indigo-600 text-[10px] font-black uppercase tracking-[0.2em] shadow-lg">PRO DUBBING AI+</div>
+              </div>
+              <p className="text-slate-400 text-lg leading-relaxed font-medium">Professional cinematic script rewriting tool.</p>
+              <button onClick={onStart} className="group w-full relative px-8 py-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl font-bold transition-all duration-300 shadow-[0_20px_40px_rgba(79,70,229,0.3)] hover:shadow-[0_25px_50px_rgba(79,70,229,0.4)] active:scale-95 flex items-center justify-center gap-3">
+                  Open Dashboard <i className="fa-solid fa-chevron-right text-xs group-hover:translate-x-1 transition-transform"></i>
+              </button>
+            </div>
+        </main>
+      );
+    }
+
+    const App = () => {
+      const [hasStarted, setHasStarted] = useState(false);
+      return (
+        <div className="relative w-full h-screen text-white overflow-hidden bg-slate-950">
+          <Background3D />
+          {hasStarted ? <Dashboard /> : <LandingPage onStart={() => setHasStarted(true)} />}
+        </div>
+      );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
